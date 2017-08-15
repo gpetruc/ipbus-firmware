@@ -1,5 +1,8 @@
 # Dependencies for ipbus_core
 
+src ipbus_ctrl_generic_ram.vhd
+src ipbus_generic_ram_if.vhd
+src pcie_dualportram.vhd
 src ipbus_ctrl.vhd
 src udp_if_flat.vhd
 src udp_buffer_selector.vhd
