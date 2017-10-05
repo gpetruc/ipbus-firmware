@@ -52,7 +52,7 @@ begin
     --- IPBUS INPUT PACKET: HEADERS ---
     rx_we <= '1';
     rx_addr <= "000" & X"00";
-    rx_data <= X"00010002"; -- header length, payload length
+    rx_data <= X"00000003"; -- packet length; WAS header length, payload length
     wait for 32 ns;
     rx_addr <= "000" & X"01";
     rx_data <= X"200001F0"; -- IPbus packet header
