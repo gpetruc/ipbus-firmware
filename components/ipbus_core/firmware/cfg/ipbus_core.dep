@@ -1,5 +1,6 @@
 # Dependencies for ipbus_core
 
+src ipbus_generic_ram_pages_if.vhd
 src ipbus_ctrl_generic_ram.vhd
 src ipbus_generic_ram_if.vhd
 src pcie_dualportram.vhd
