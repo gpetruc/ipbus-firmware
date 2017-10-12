@@ -46,6 +46,7 @@ begin
     rst_ipb <= '1';
     rst_pcie <= '1';
     wait for 128 ns;
+    wait until ipb_clk = '0';
     rst_ipb <= '0';
     rst_pcie <= '0';
     wait for 256 ns;
@@ -96,7 +97,7 @@ begin
   ipbus_if : entity work.ipbus_generic_ram_pages_if
     port map (
       pcie_clk => ipb_clk,
-      rst_pcieclk => rst_ipb,
+      rst_pcieclk => rst_pcie,
       ipb_clk => ipb_clk,
       rst_ipb => rst_ipb,
 
