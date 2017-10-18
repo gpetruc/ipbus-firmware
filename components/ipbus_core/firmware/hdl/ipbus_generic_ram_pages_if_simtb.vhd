@@ -26,8 +26,8 @@ architecture Behavioral of ipbus_generic_ram_pages_if_simtb is
   signal rst_pcie: std_logic := '1';
   signal nuke: std_logic := '0';
 
-  signal rx_addr : std_logic_vector(10 downto 0);
-  signal rx_data : std_logic_vector(31 downto 0);
+  signal rx_addr : std_logic_vector(8 downto 0);
+  signal rx_data : std_logic_vector(127 downto 0);
   signal rx_we : std_logic := '0';
 
   signal tx_addr : std_logic_vector(11 downto 0);
@@ -52,18 +52,18 @@ begin
     wait for 256 ns;
     --- IPBUS INPUT PACKET: HEADERS ---
     rx_we <= '1';
-    rx_addr <= "000" & X"00";
-    rx_data <= X"00000003"; -- packet length; WAS header length, payload length
-    wait for 32 ns;
-    rx_addr <= "000" & X"01";
-    rx_data <= X"200001F0"; -- IPbus packet header
+    rx_addr <= (Others => '0');
+    rx_data(31 downto 0) <= X"00000003"; -- packet length; WAS header length, payload length
+--    wait for 32 ns;
+--    rx_addr <= "000" & X"01";
+    rx_data(63 downto 32) <= X"200001F0"; -- IPbus packet header
     -- IPBUS INPUT PACKET: READ TRANSACTION --
-    wait for 32 ns;
-    rx_addr <= "000" & X"02";
-    rx_data <= X"2001010F";
-    wait for 32 ns;
-    rx_addr <= "000" & X"03";
-    rx_data <= X"00000001";
+--    wait for 32 ns;
+--    rx_addr <= "000" & X"02";
+    rx_data(95 downto 64) <= X"2001010F";
+--    wait for 32 ns;
+--    rx_addr <= "000" & X"03";
+    rx_data(127 downto 96) <= X"00000001";
     -- END OF INPUT PACKET --
     wait for 32 ns;
     rx_we <= '0';

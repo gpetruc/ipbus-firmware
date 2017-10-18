@@ -25,8 +25,8 @@ entity ipbus_generic_ram_pages_if is
   	ipb_clk: in std_logic;
   	rst_ipb: in std_logic;
 
-    rx_addr : in std_logic_vector(BUFWIDTH + ADDRWIDTH - 1 downto 0);
-    rx_data : in std_logic_vector(31 downto 0);
+    rx_addr : in std_logic_vector(BUFWIDTH + ADDRWIDTH - 3 downto 0);
+    rx_data : in std_logic_vector(127 downto 0);
     rx_we   : in std_logic;
 
     tx_addr : out std_logic_vector(BUFWIDTH + ADDRWIDTH downto 0);
@@ -48,15 +48,22 @@ architecture rtl of ipbus_generic_ram_pages_if is
   SIGNAL tx_page_idx : unsigned(BUFWIDTH - 1 downto 0) := (Others => '0');
   SIGNAL tx_page_count : unsigned(31 downto 0) := (Others => '0');
 
-  -- init
-  SIGNAL init_phase : std_logic := '0';
-  SIGNAL init_clk_count : unsigned(2 downto 0) := "000";
 
-  -- rx handler
-  SIGNAL rx_pkt_size : std_logic_vector(31 downto 0);
-  SIGNAL rx_data_i : std_logic_vector(31 downto 0);
-  SIGNAL rx_addr_i : std_logic_vector(ADDRWIDTH - 1 downto 0);
-  SIGNAL rx_send_i, rx_send_i_d, rx_send_i_d2 : std_logic := '0';
+  type rx_state_type is (RX_RESET, RX_LISTEN, RX_TRANSFER);
+  SIGNAL rx_state : rx_state_type;
+  SIGNAL rx_next_state : rx_state_type;
+  SIGNAL rx_addr_d : std_logic_vector(BUFWIDTH + ADDRWIDTH - 3 downto 0);
+  type rx_ram_type is array (2**(ADDRWIDTH-2) - 1 downto 0) of std_logic_vector (127 downto 0);
+  SIGNAL rx_ram : rx_ram_type;
+  SIGNAL rx_ram_wdata : std_logic_vector(127 downto 0);
+  SIGNAL rx_ram_waddr : std_logic_vector(ADDRWIDTH - 3 downto 0);
+  SIGNAL rx_ram_we : std_logic;
+  SIGNAL rx_ram_rdata : std_logic_vector(31 downto 0);
+  SIGNAL rx_ram_raddr, rx_ram_raddr_d : std_logic_vector(ADDRWIDTH - 1 downto 0);
+  SIGNAL rx_pkt_size_32 : std_logic_vector(ADDRWIDTH - 1 downto 0);
+  SIGNAL rx_pkt_size_128 : std_logic_vector(ADDRWIDTH - 3 downto 0);
+  SIGNAL rx_send, rx_send_d, rx_we_i : std_logic;
+
 
   type tx_state_type is (TX_RESET, TX_TRANSFER_STATUS, TX_IDLE, TX_TRANSFER_PACKET, TX_UPDATE_COUNT);
   SIGNAL tx_state : tx_state_type := TX_RESET;
@@ -73,69 +80,121 @@ architecture rtl of ipbus_generic_ram_pages_if is
 
   SIGNAL ram_tx_req_send : std_logic;
 
-  constant page_addr_zero : std_logic_vector(ADDRWIDTH - 1 downto 0) := (Others => '0');
+  constant page_addr_zero : std_logic_vector(ADDRWIDTH - 3 downto 0) := (Others => '0');
 
 begin
 
-  reset_block : process (pcie_clk)
+  --------------------------
+  --   RX STATE MACHINE   --
+  --------------------------
+
+  process (pcie_clk)
   begin
     if rising_edge(pcie_clk) then
       if rst_pcieclk = '1' then
-        --rx_page_idx <= (Others => '0');
-        --tx_page_idx <= (Others => '0');
-        --tx_page_count <= (Others => '0');
-        --rx_send_i <= '0';
-        --rx_pkt_size <= (Others => '0');
-        init_clk_count <= (Others => '1');
-      elsif init_clk_count /= 3 then
-        init_clk_count <= init_clk_count + 1;
-        init_phase <= '1';
+        rx_state <= RX_RESET;
       else
-        init_phase <= '0';
+        rx_state <= rx_next_state;
       end if;
     end if;
-  end process reset_block;
+  end process;
 
-  --process (pcie_clk)
-  --begin
-  --  if rising_edge(pcie_clk) then
-  --    if init_clk_count /= 3 then
-  --      init_clk_count <= init_clk_count + 1;
-  --      init_phase <= '1';
-  --    else
-  --     init_phase <= '0';
-  --    end if;
-  --  end if;
-  --end process;
+  -- Combinatorial process for next state  
+  process (rx_state, rx_addr, rx_page_idx, rx_pkt_size_128, rx_pkt_size_32, rx_ram_raddr_d)
+  begin
+    case rx_state is
+      when RX_RESET =>
+        rx_next_state <= RX_LISTEN;
+      when RX_LISTEN =>
+        if rx_addr = (std_logic_vector(rx_page_idx) & rx_pkt_size_128) then
+          rx_next_state <= RX_TRANSFER;
+        else
+          rx_next_state <= RX_LISTEN;
+        end if;
+      when RX_TRANSFER =>
+        if rx_ram_raddr_d = rx_pkt_size_32 then
+          rx_next_state <= RX_LISTEN;
+        else
+          rx_next_state <= RX_TRANSFER;
+        end if;
+      when others => 
+        rx_next_state <= RX_RESET;
+    end case;
+  end process;
 
 
-  rx_addr_i <= rx_addr(ADDRWIDTH - 1 downto 0); -- converted to  - 2**BUFWIDTH;
-
-  rx_data_i <= x"0001" & std_logic_vector((unsigned(rx_data(15 downto 0)) - 1)) when rx_addr = (std_logic_vector(rx_page_idx) & page_addr_zero) else rx_data;
+  process (pcie_clk)
+  begin
+    if rising_edge(pcie_clk) then
+      rx_addr_d <= rx_addr;
+      rx_ram_raddr_d <= rx_ram_raddr;
+    end if;
+  end process;
 
   rx_pkt_size_extractor : process (pcie_clk)
   begin
     if rising_edge(pcie_clk) then
       if rst_pcieclk = '1' then
-        rx_pkt_size <= (Others => '1');
-      elsif rx_addr = (std_logic_vector(rx_page_idx) & page_addr_zero) then
-        rx_pkt_size <= rx_data;
-      else
+        rx_pkt_size_32 <= (Others => '1');
+      elsif rx_state = RX_LISTEN and rx_addr_d = (std_logic_vector(rx_page_idx) & page_addr_zero) then
+        rx_pkt_size_32 <= rx_data(ADDRWIDTH - 1 downto 0);
       end if;
     end if;
   end process rx_pkt_size_extractor;
+  rx_pkt_size_128 <= rx_pkt_size_32(ADDRWIDTH - 1 downto 2);
 
-  rx_pkt_end_detector : process (pcie_clk)
+
+  rx_ram_waddr <= rx_addr(ADDRWIDTH - 3 downto 0);
+  rx_ram_wdata(31 downto 0) <= x"0001" & std_logic_vector((unsigned(rx_data(15 downto 0)) - 1)) when rx_addr = (std_logic_vector(rx_page_idx) & page_addr_zero) else rx_data(31 downto 0);
+  rx_ram_wdata(127 downto 32) <= rx_data(127 downto 32);
+  rx_ram_we <= '1' when (rx_we = '1') and (rx_state = RX_LISTEN) else '0';
+
+
+  rx_ram_write : process (pcie_clk)
   begin
     if rising_edge(pcie_clk) then
-      if rst_pcieclk = '1' then
-        rx_send_i <= '0';
-        rx_page_idx <= (Others => '0');
-      elsif rx_addr = (std_logic_vector(rx_page_idx) & std_logic_vector(resize(unsigned(rx_pkt_size),ADDRWIDTH))) then
-        rx_send_i <= '1';
-        rx_page_idx <= rx_page_idx + 1;
+      if rx_ram_we = '1' then
+        rx_ram(to_integer(unsigned(rx_ram_waddr))) <= rx_ram_wdata;
+      end if;
+    end if;
+  end process;
+
+  rx_ram_read : process (pcie_clk)
+  begin
+    if rising_edge(pcie_clk) then
+      case rx_ram_raddr(1 downto 0) is
+        when "00" =>
+          rx_ram_rdata <= rx_ram(to_integer(unsigned(rx_ram_raddr(ADDRWIDTH-1 downto 2))))(31 downto 0);
+        when "01" =>
+          rx_ram_rdata <= rx_ram(to_integer(unsigned(rx_ram_raddr(ADDRWIDTH-1 downto 2))))(63 downto 32);
+        when "10" =>
+          rx_ram_rdata <= rx_ram(to_integer(unsigned(rx_ram_raddr(ADDRWIDTH-1 downto 2))))(95 downto 64);
+        when "11" =>
+          rx_ram_rdata <= rx_ram(to_integer(unsigned(rx_ram_raddr(ADDRWIDTH-1 downto 2))))(127 downto 96);
+        when others =>
+          rx_ram_rdata <= (Others => 'U');
+      end case;
+    end if;
+  end process;
+
+  rx_ram_increment_raddr : process (pcie_clk)
+  begin
+    if rising_edge(pcie_clk) then
+      if rx_next_state /= RX_TRANSFER then
+        rx_ram_raddr <= (Others => '0');
       else
-        rx_send_i <= '0';
+        rx_ram_raddr <= std_logic_vector(unsigned(rx_ram_raddr) + 1);
+      end if;
+    end if;
+  end process;
+
+  rx_send_generator : process (pcie_clk)
+  begin
+    if rising_edge(pcie_clk) then
+      if (rx_state = RX_TRANSFER) and (rx_next_state = RX_LISTEN) then
+        rx_send <= '1';
+      else
+        rx_send <= '0';
       end if;
     end if;
   end process;
@@ -143,14 +202,22 @@ begin
   process (pcie_clk)
   begin
     if rising_edge(pcie_clk) then
-      rx_send_i_d <= rx_send_i;
+      rx_send_d <= rx_send;
     end if;
   end process;
+
+  rx_we_i <= '1' when rx_state = RX_TRANSFER else '0';
 
   process (pcie_clk)
   begin
     if rising_edge(pcie_clk) then
-      rx_send_i_d2 <= rx_send_i_d;
+      if rx_state = RX_RESET then
+        rx_page_idx <= (Others => '0');
+      elsif (rx_state = RX_TRANSFER) and (rx_next_state = RX_LISTEN) then
+        rx_page_idx <= rx_page_idx + 1;
+      else
+        rx_page_idx <= rx_page_idx;
+      end if;
     end if;
   end process;
 
@@ -183,7 +250,7 @@ begin
 
 
   -- Combinatorial logic that determines next state
-  process (tx_state, tx_state_clock_count, ram_tx_req_send) -- FIXME: replace all with actual list
+  process (tx_state, tx_state_clock_count, ram_tx_req_send, tx_page_size)
   begin
     case tx_state is
       when TX_RESET =>
@@ -270,8 +337,12 @@ begin
   process (pcie_clk)
   begin
     if rising_edge(pcie_clk) then
-      if (tx_state = TX_TRANSFER_PACKET and tx_next_state = TX_TRANSFER_STATUS) then
+      if (tx_state = TX_RESET) then
+        tx_page_count <= (Others => '0');
+        tx_page_idx <= (Others => '0');
+      elsif (tx_state = TX_TRANSFER_PACKET and tx_next_state = TX_TRANSFER_STATUS) then
         tx_page_count <= tx_page_count + 1;
+        tx_page_idx <= tx_page_idx + 1;
       end if;
     end if;
   end process;
@@ -293,11 +364,11 @@ begin
       ipb_clk => ipb_clk,
       rst_ipb => rst_ipb,
 
-      ram_rx_addr => rx_addr_i,
-      ram_rx_data => rx_data_i,
+      ram_rx_addr => rx_ram_raddr_d,
+      ram_rx_data => rx_ram_rdata,
       ram_rx_reset => rst_pcieclk,
-      ram_rx_payload_send => rx_send_i_d2,
-      ram_rx_payload_we => rx_we,
+      ram_rx_payload_send => rx_send_d,
+      ram_rx_payload_we => rx_we_i,
       ram_tx_addr => std_logic_vector(tx_state_clock_count),
       ram_tx_busy => tx_busy_i,
 
