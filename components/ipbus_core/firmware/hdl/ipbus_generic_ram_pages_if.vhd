@@ -44,12 +44,9 @@ end ipbus_generic_ram_pages_if;
 architecture rtl of ipbus_generic_ram_pages_if is
 
   -- meta data for publication
-  SIGNAL rx_page_idx : unsigned(BUFWIDTH - 1 downto 0);
-  SIGNAL tx_page_idx : unsigned(BUFWIDTH - 1 downto 0);
-  SIGNAL tx_page_count : unsigned(31 downto 0);
-
-  type header_t is array (3 downto 0) of std_logic_vector(31 downto 0);
-  SIGNAL header : header_t;
+  SIGNAL rx_page_idx : unsigned(BUFWIDTH - 1 downto 0) := (Others => '0');
+  SIGNAL tx_page_idx : unsigned(BUFWIDTH - 1 downto 0) := (Others => '0');
+  SIGNAL tx_page_count : unsigned(31 downto 0) := (Others => '0');
 
   -- init
   SIGNAL init_phase : std_logic := '0';
@@ -61,26 +58,24 @@ architecture rtl of ipbus_generic_ram_pages_if is
   SIGNAL rx_addr_i : std_logic_vector(ADDRWIDTH - 1 downto 0);
   SIGNAL rx_send_i, rx_send_i_d, rx_send_i_d2 : std_logic := '0';
 
-  SIGNAL ram_tx_req_send : std_logic;
-  SIGNAL tx_transfer_page : std_logic := '0';
-  SIGNAL tx_transfer_page_d : std_logic := '0';
-  SIGNAL tx_addr_local_i : std_logic_vector(ADDRWIDTH - 1 downto 0);
-  SIGNAL tx_addr_global_i : std_logic_vector(BUFWIDTH + ADDRWIDTH downto 0);
-  SIGNAL tx_addr_global_i_d : std_logic_vector(BUFWIDTH + ADDRWIDTH downto 0);
-  SIGNAL tx_data_i : std_logic_vector(31 downto 0);
-  SIGNAL tx_we_i : std_logic;
+  type tx_state_type is (TX_RESET, TX_TRANSFER_STATUS, TX_IDLE, TX_TRANSFER_PACKET, TX_UPDATE_COUNT);
+  SIGNAL tx_state : tx_state_type := TX_RESET;
+  SIGNAL tx_next_state : tx_state_type;
+  SIGNAL tx_state_clock_count : unsigned(ADDRWIDTH - 1 downto 0) := (Others => '0');
+  SIGNAL tx_addr_i : std_logic_vector(BUFWIDTH + ADDRWIDTH downto 0);
+  SIGNAL tx_addr_i_stat : std_logic_vector(BUFWIDTH + ADDRWIDTH downto 0);
+  SIGNAL tx_addr_i_ctrl : std_logic_vector(BUFWIDTH + ADDRWIDTH downto 0);
+  SIGNAL tx_data_i_stat : std_logic_vector(31 downto 0);
+  SIGNAL tx_data_i_ctrl : std_logic_vector(31 downto 0);
+  SIGNAL tx_page_size : unsigned(ADDRWIDTH - 1 downto 0) := (Others => '0');
+  SIGNAL tx_we_i_ctrl : std_logic;
   SIGNAL tx_busy_i : std_logic;
+
+  SIGNAL ram_tx_req_send : std_logic;
 
   constant page_addr_zero : std_logic_vector(ADDRWIDTH - 1 downto 0) := (Others => '0');
 
-  constant number_of_buffers : unsigned(31 downto 0) := to_unsigned(integer(2)**BUFWIDTH, 32);
-
 begin
-
-  header(0) <= std_logic_vector(to_unsigned(2**BUFWIDTH, 32));
-  header(1) <= std_logic_vector(to_unsigned(2**ADDRWIDTH, 32));
-  header(2) <= std_logic_vector(resize(rx_page_idx, 32));
-  header(3) <= std_logic_vector(tx_page_count);
 
   reset_block : process (pcie_clk)
   begin
@@ -160,67 +155,17 @@ begin
   end process;
 
 
-  process (pcie_clk)
-  begin
-    if rising_edge(pcie_clk) then
-      if tx_transfer_page = '1' then
-        tx_addr <= tx_addr_global_i_d;
-      else 
-        tx_addr <= std_logic_vector(resize(init_clk_count, tx_addr'length));
-      end if;
-      tx_we <= tx_we_i or init_phase;
-    end if;
-  end process;
-  process (pcie_clk)
-  begin
-    if rising_edge(pcie_clk) then
-        tx_addr_global_i_d <= tx_addr_global_i;
-    end if;
-  end process;
-
-  tx_addr_global_i <= std_logic_vector(4 + unsigned('0' & (std_logic_vector(tx_page_idx) & tx_addr_local_i)));
-  --tx_data <= tx_data_i when tx_transfer_page = '1' else header(to_integer(init_clk_count));
-  process (pcie_clk)
-  begin
-    if rising_edge(pcie_clk) then
-      if tx_transfer_page = '1' then
-        tx_data <= tx_data_i;
-      elsif init_clk_count = "000" then
-        tx_data <= std_logic_vector(to_unsigned(2**BUFWIDTH, 32));
-      elsif init_clk_count = "001" then 
-        tx_data <= std_logic_vector(to_unsigned(2**ADDRWIDTH, 32));
-      elsif init_clk_count = "010" then
-        tx_data <= std_logic_vector(resize(rx_page_idx, 32));
-      elsif init_clk_count = "011" then
-        tx_data <= std_logic_vector(tx_page_count);
-      end if;
-    end if;
-  end process;
+  --------------------------
+  --   TX STATE MACHINE   --
+  --------------------------
 
   process (pcie_clk)
-  begin
-    if rising_edge(pcie_clk) then
-      tx_we_i <= (tx_transfer_page or tx_transfer_page_d);
-    end if;
-  end process;
-
-  tx_pkt_rdy_detector : process (pcie_clk)
   begin
     if rising_edge(pcie_clk) then
       if rst_pcieclk = '1' then
-        tx_page_idx <= (Others => '0');
-        tx_page_count <= (Others => '0');
-      elsif ram_tx_req_send = '1' then
-        tx_transfer_page <= '1';
-        tx_busy_i <= '1';
-        tx_addr_local_i <= (Others => '0');
-      elsif tx_addr_local_i = std_logic_vector(to_unsigned(0, ADDRWIDTH) - 1) then
-        tx_transfer_page <= '0';
-        tx_busy_i <= '0';
-        tx_page_idx <= tx_page_idx + 1;
-        tx_page_count <= tx_page_count + 1;
+        tx_state <= TX_RESET;
       else
-        tx_addr_local_i <= std_logic_vector(unsigned(tx_addr_local_i) + 1);
+        tx_state <= tx_next_state;
       end if;
     end if;
   end process;
@@ -228,11 +173,114 @@ begin
   process (pcie_clk)
   begin
     if rising_edge(pcie_clk) then
-      tx_transfer_page_d <= tx_transfer_page;
+      if rst_pcieclk = '1' or (tx_next_state /= tx_state) then
+        tx_state_clock_count <= (Others => '0');
+      else
+        tx_state_clock_count <= tx_state_clock_count + 1;
+      end if;
     end if;
   end process;
 
 
+  -- Combinatorial logic that determines next state
+  process (tx_state, tx_state_clock_count, ram_tx_req_send) -- FIXME: replace all with actual list
+  begin
+    case tx_state is
+      when TX_RESET =>
+        tx_next_state <= TX_TRANSFER_STATUS;
+
+      when TX_TRANSFER_STATUS =>
+        if tx_state_clock_count(2 downto 0) /= "011" then
+          tx_next_state <= TX_TRANSFER_STATUS;
+        else
+          tx_next_state <= TX_IDLE;
+        end if;
+
+      when TX_IDLE =>
+        if ram_tx_req_send = '0' then
+          tx_next_state <= TX_IDLE;
+        else
+          tx_next_state <= TX_TRANSFER_PACKET;
+        end if;
+
+      when TX_TRANSFER_PACKET =>
+        if (tx_state_clock_count /= tx_page_size + 1) then
+          tx_next_state <= TX_TRANSFER_PACKET;
+        else
+          tx_next_state <= TX_TRANSFER_STATUS;
+        end if;
+
+      when others =>
+        tx_next_state <= TX_RESET;
+
+    end case;
+  end process;
+
+
+  tx_addr <= tx_addr_i;
+  tx_addr_i <= tx_addr_i_stat when tx_state = TX_TRANSFER_STATUS else tx_addr_i_ctrl;
+  tx_addr_i_stat <= std_logic_vector(resize(unsigned(tx_state_clock_count), BUFWIDTH + ADDRWIDTH + 1));
+  process (pcie_clk)
+  begin
+    if rising_edge(pcie_clk) then
+      tx_addr_i_ctrl <= std_logic_vector(resize(tx_page_idx & tx_state_clock_count, BUFWIDTH + ADDRWIDTH + 1) + 4);
+    end if ;
+  end process ;
+
+  tx_data <= tx_data_i_stat when tx_state = TX_TRANSFER_STATUS else tx_data_i_ctrl;
+  process (tx_state_clock_count)
+  begin
+    if tx_state_clock_count(1 downto 0) = "00" then
+      tx_data_i_stat <= std_logic_vector(to_unsigned(2**BUFWIDTH, 32));
+    elsif tx_state_clock_count(1 downto 0) = "01" then
+      tx_data_i_stat <= std_logic_vector(to_unsigned(2**ADDRWIDTH, 32));
+    elsif tx_state_clock_count(1 downto 0) =  "10" then
+      tx_data_i_stat <= std_logic_vector(resize(rx_page_idx, 32));
+    else
+      tx_data_i_stat <= std_logic_vector(tx_page_count);
+    end if;
+  end process;
+
+  tx_extract_page_size : process (pcie_clk)
+  begin
+    if rising_edge(pcie_clk) then
+      if ((rst_pcieclk = '1') or (tx_state = TX_IDLE)) then
+        tx_page_size(ADDRWIDTH - 1 downto 1) <= (Others => '1');
+        tx_page_size(0) <= '0';
+      elsif (tx_state = TX_TRANSFER_PACKET and tx_state_clock_count = 1) then
+        tx_page_size <= resize(unsigned(tx_data_i_ctrl(15 downto 0)) + 1, ADDRWIDTH);
+      end if;
+    end if;
+  end process;
+
+  tx_we <= '1' when (tx_state = TX_TRANSFER_STATUS) else tx_we_i_ctrl;
+  process (pcie_clk)
+  begin
+    if rising_edge(pcie_clk) then
+      if (tx_state = TX_TRANSFER_PACKET) then
+        tx_we_i_ctrl <= '1';
+      else
+        tx_we_i_ctrl <= '0';
+      end if;
+    end if ;
+  end process;
+
+  tx_busy_i <= '1' when (tx_state = TX_TRANSFER_PACKET) else '0';
+
+  process (pcie_clk)
+  begin
+    if rising_edge(pcie_clk) then
+      if (tx_state = TX_TRANSFER_PACKET and tx_next_state = TX_TRANSFER_STATUS) then
+        tx_page_count <= tx_page_count + 1;
+      end if;
+    end if;
+  end process;
+
+
+
+  -----------------------------------------------
+  --  GENERIC IPBUS PACKET-ORIENTED INTERFACE  --
+  -----------------------------------------------
 
   ipbus_ram_pkt_if : entity work.ipbus_generic_ram_if
     generic map (
@@ -250,7 +298,7 @@ begin
       ram_rx_reset => rst_pcieclk,
       ram_rx_payload_send => rx_send_i_d2,
       ram_rx_payload_we => rx_we,
-      ram_tx_addr => tx_addr_local_i,
+      ram_tx_addr => std_logic_vector(tx_state_clock_count),
       ram_tx_busy => tx_busy_i,
 
       pkt_done => trans_out.pkt_done,
@@ -259,7 +307,7 @@ begin
       wdata => trans_out.wdata,
       we => trans_out.we,
 
-      ram_tx_data => tx_data_i,
+      ram_tx_data => tx_data_i_ctrl,
       ram_tx_req_send => ram_tx_req_send,
 
       pkt_ready => trans_in.pkt_rdy,
